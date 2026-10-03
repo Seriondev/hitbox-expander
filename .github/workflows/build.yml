@@ -93,7 +93,7 @@ jobs:
             "id": "hitboxexpander",
             "version": "${version}",
             "name": "Hitbox Expander",
-            "description": "Memperbesar hitbox pemain lain di sisi client.",
+            "description": "Memperbesar hitbox makhluk di sisi client.",
             "license": "MIT",
             "environment": "client",
             "entrypoints": {
@@ -107,6 +107,13 @@ jobs:
             }
           }
           EOF
+
+          # Icon (opsional): kalau ada icon.png di root repo, dipasang otomatis
+          if [ -f ../icon.png ]; then
+            mkdir -p src/main/resources/assets/hitboxexpander
+            cp ../icon.png src/main/resources/assets/hitboxexpander/icon.png
+            sed -i 's|"name": "Hitbox Expander",|"name": "Hitbox Expander",\n  "icon": "assets/hitboxexpander/icon.png",|' src/main/resources/fabric.mod.json
+          fi
 
           cat > src/main/resources/hitboxexpander.mixins.json <<'EOF'
           {
@@ -128,6 +135,8 @@ jobs:
               public static volatile boolean enabled = true;
               // Tambahan ukuran hitbox (blok) di setiap sisi.
               public static volatile float margin = 0.3f;
+              // Berapa kali hitbox diperbesar (untuk mengecek mixin aktif atau tidak).
+              public static volatile long applied = 0;
 
               private HitboxConfig() {}
           }
@@ -171,7 +180,8 @@ jobs:
                           .executes(ctx -> {
                               ctx.getSource().sendFeedback(Text.literal("Hitbox: "
                                   + (HitboxConfig.enabled ? "ON" : "OFF")
-                                  + " (+" + HitboxConfig.margin + "). Pakai /hitbox on, /hitbox off, atau /hitbox 0.3"));
+                                  + " (+" + HitboxConfig.margin + ") | terpakai: " + HitboxConfig.applied
+                                  + " kali. Pakai /hitbox on, /hitbox off, atau /hitbox 0.5"));
                               return 1;
                           })
                           .then(ClientCommandManager.literal("on").executes(ctx -> {
@@ -199,8 +209,9 @@ jobs:
           package com.hitboxexpander.mixin;
 
           import com.hitboxexpander.HitboxConfig;
-          import net.minecraft.client.network.OtherClientPlayerEntity;
+          import net.minecraft.client.MinecraftClient;
           import net.minecraft.entity.Entity;
+          import net.minecraft.entity.LivingEntity;
           import org.spongepowered.asm.mixin.Mixin;
           import org.spongepowered.asm.mixin.injection.At;
           import org.spongepowered.asm.mixin.injection.Inject;
@@ -212,7 +223,14 @@ jobs:
               @Inject(method = "getTargetingMargin", at = @At("RETURN"), cancellable = true, require = 0)
               private void hitboxexpander$expand(CallbackInfoReturnable<Float> cir) {
                   try {
-                      if (HitboxConfig.enabled && (Object) this instanceof OtherClientPlayerEntity) {
+                      if (!HitboxConfig.enabled) return;
+                      MinecraftClient mc = MinecraftClient.getInstance();
+                      // Hanya di thread client (bukan server internal singleplayer).
+                      if (mc == null || !mc.isOnThread()) return;
+                      Object self = this;
+                      // Semua makhluk hidup (pemain lain + mob), kecuali diri sendiri.
+                      if (self instanceof LivingEntity && self != mc.player) {
+                          HitboxConfig.applied++;
                           cir.setReturnValue(cir.getReturnValueF() + HitboxConfig.margin);
                       }
                   } catch (Throwable ignored) {
