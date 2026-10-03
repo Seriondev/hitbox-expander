@@ -1,2 +1,2 @@
 # hitbox-expander
-expanding your hitbox in Minecraft 
+Expanding Your Hitbox In Minecraft 
