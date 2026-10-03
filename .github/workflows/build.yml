@@ -121,7 +121,7 @@ jobs:
             "minVersion": "0.8",
             "package": "com.hitboxexpander.mixin",
             "compatibilityLevel": "JAVA_21",
-            "client": ["EntityMixin"],
+            "client": ["EntityMixin", "MinecraftClientMixin", "InGameHudMixin"],
             "injectors": {
               "defaultRequire": 0
             }
@@ -140,14 +140,48 @@ jobs:
           import java.util.Properties;
 
           public final class HitboxConfig {
-              // Selalu MATI saat game baru dibuka. Harus dinyalakan lagi lewat GUI atau /hitbox on.
+              // Pilihan suara toggle (indeks 0 = mati).
+              public static final String[] SOUND_NAMES = {
+                  "Mati", "Tik (hat)", "Snare", "Bit", "Pling", "Lonceng",
+                  "Kerincing", "Xilofon", "Cow Bell", "Harp", "Klik UI", "XP"
+              };
+              public static final int SOUND_COUNT = SOUND_NAMES.length;
+
+              // Selalu MATI saat game baru dibuka. Harus dinyalakan lagi lewat GUI, keybind, atau /hb on.
               public static volatile boolean enabled = false;
-              // Tambahan ukuran hitbox (blok) di setiap sisi. Ini yang disimpan ke file.
-              public static volatile float margin = 0.3f;
+
+              // Semua yang di bawah ini disimpan ke file.
+              public static volatile float margin = 0.3f;      // tambahan ukuran hitbox (blok)
+              public static volatile int toggleKey = -1;       // kode tombol GLFW, -1 = belum diatur
+              public static volatile boolean textEnabled = true; // teks ON/OFF di layar
+              public static volatile float textX = 0.5f;       // posisi teks (0..1 dari lebar layar)
+              public static volatile float textY = 0.25f;      // posisi teks (0..1 dari tinggi layar)
+              public static volatile int soundMode = 1;        // indeks SOUND_NAMES
+
               // Berapa kali hitbox diperbesar (untuk mengecek mixin aktif atau tidak).
               public static volatile long applied = 0;
 
               private HitboxConfig() {}
+
+              // Ganti status ON/OFF. Kalau berubah: tampil teks di layar dan bunyi.
+              public static void setEnabled(boolean on) {
+                  boolean changed = enabled != on;
+                  enabled = on;
+                  if (changed) {
+                      try {
+                          HitboxFeedback.show(on);
+                      } catch (Throwable ignored) {
+                      }
+                  }
+              }
+
+              public static void toggle() {
+                  setEnabled(!enabled);
+              }
+
+              private static float clamp01(float v) {
+                  return Math.max(0.0f, Math.min(1.0f, v));
+              }
 
               private static Path file() {
                   return FabricLoader.getInstance().getConfigDir().resolve("hitboxexpander.properties");
@@ -161,8 +195,13 @@ jobs:
                       try (InputStream in = Files.newInputStream(f)) {
                           p.load(in);
                       }
-                      float m = Float.parseFloat(p.getProperty("margin", "0.3"));
-                      margin = Math.max(0.0f, Math.min(1.0f, m));
+                      margin = clamp01(Float.parseFloat(p.getProperty("margin", "0.3")));
+                      toggleKey = Integer.parseInt(p.getProperty("toggleKey", "-1"));
+                      textEnabled = Boolean.parseBoolean(p.getProperty("textEnabled", "true"));
+                      textX = clamp01(Float.parseFloat(p.getProperty("textX", "0.5")));
+                      textY = clamp01(Float.parseFloat(p.getProperty("textY", "0.25")));
+                      int sm = Integer.parseInt(p.getProperty("soundMode", "1"));
+                      soundMode = Math.max(0, Math.min(SOUND_COUNT - 1, sm));
                   } catch (Throwable t) {
                       System.err.println("[HitboxExpander] Gagal membaca config: " + t);
                   }
@@ -172,11 +211,223 @@ jobs:
                   try {
                       Properties p = new Properties();
                       p.setProperty("margin", Float.toString(margin));
+                      p.setProperty("toggleKey", Integer.toString(toggleKey));
+                      p.setProperty("textEnabled", Boolean.toString(textEnabled));
+                      p.setProperty("textX", Float.toString(textX));
+                      p.setProperty("textY", Float.toString(textY));
+                      p.setProperty("soundMode", Integer.toString(soundMode));
                       try (OutputStream out = Files.newOutputStream(file())) {
                           p.store(out, "Hitbox Expander");
                       }
                   } catch (Throwable t) {
                       System.err.println("[HitboxExpander] Gagal menyimpan config: " + t);
+                  }
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/hitboxexpander/HitboxFeedback.java <<'EOF'
+          package com.hitboxexpander;
+
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.sound.PositionedSoundInstance;
+          import net.minecraft.registry.entry.RegistryEntry;
+          import net.minecraft.sound.SoundEvent;
+          import net.minecraft.sound.SoundEvents;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.Formatting;
+
+          // Teks ON/OFF di layar (font Minecraft biasa + bold) dan suara toggle.
+          public final class HitboxFeedback {
+              private static final long SHOW_MS = 1800L;
+              private static final long FADE_MS = 500L;
+
+              private static volatile long until = 0L;
+              private static volatile boolean lastOn = false;
+              public static volatile int drawCalls = 0;
+
+              private HitboxFeedback() {}
+
+              public static void show(boolean on) {
+                  lastOn = on;
+                  if (HitboxConfig.textEnabled) {
+                      until = System.currentTimeMillis() + SHOW_MS;
+                  }
+                  playSound(on);
+              }
+
+              // Dengarkan suara yang sedang dipilih (dipakai saat ganti pilihan di GUI).
+              public static void preview() {
+                  playSound(true);
+              }
+
+              // Dua versi play(): konstanta suara bisa bertipe SoundEvent atau RegistryEntry.
+              private static void play(SoundEvent sound, float pitch) {
+                  MinecraftClient mc = MinecraftClient.getInstance();
+                  if (mc == null) return;
+                  mc.getSoundManager().play(PositionedSoundInstance.master(sound, pitch, 1.0f));
+              }
+
+              private static void play(RegistryEntry<SoundEvent> sound, float pitch) {
+                  MinecraftClient mc = MinecraftClient.getInstance();
+                  if (mc == null) return;
+                  mc.getSoundManager().play(PositionedSoundInstance.master(sound, pitch, 1.0f));
+              }
+
+              private static void playSound(boolean on) {
+                  // ON: nada tinggi, OFF: nada rendah.
+                  float pitch = on ? 1.5f : 0.8f;
+                  switch (HitboxConfig.soundMode) {
+                      case 1: play(SoundEvents.BLOCK_NOTE_BLOCK_HAT, pitch); break;
+                      case 2: play(SoundEvents.BLOCK_NOTE_BLOCK_SNARE, pitch); break;
+                      case 3: play(SoundEvents.BLOCK_NOTE_BLOCK_BIT, pitch); break;
+                      case 4: play(SoundEvents.BLOCK_NOTE_BLOCK_PLING, pitch); break;
+                      case 5: play(SoundEvents.BLOCK_NOTE_BLOCK_BELL, pitch); break;
+                      case 6: play(SoundEvents.BLOCK_NOTE_BLOCK_CHIME, pitch); break;
+                      case 7: play(SoundEvents.BLOCK_NOTE_BLOCK_XYLOPHONE, pitch); break;
+                      case 8: play(SoundEvents.BLOCK_NOTE_BLOCK_COW_BELL, pitch); break;
+                      case 9: play(SoundEvents.BLOCK_NOTE_BLOCK_HARP, pitch); break;
+                      case 10: play(SoundEvents.UI_BUTTON_CLICK, pitch); break;
+                      case 11: play(SoundEvents.ENTITY_EXPERIENCE_ORB_PICKUP, pitch); break;
+                      default: break; // 0 = mati
+                  }
+              }
+
+              // Dipanggil dari HUD tiap frame.
+              public static void draw(DrawContext context, MinecraftClient mc) {
+                  if (mc == null || !HitboxConfig.textEnabled) return;
+                  // Saat GUI mod terbuka, GUI sendiri yang menggambar pratinjau teks.
+                  if (mc.currentScreen instanceof HitboxScreen) return;
+
+                  long left = until - System.currentTimeMillis();
+                  if (left <= 0) return;
+
+                  int alpha = left >= FADE_MS ? 255 : (int) (255L * left / FADE_MS);
+                  if (alpha < 8) return;
+
+                  drawCalls++;
+                  drawAt(context, mc, lastOn, alpha);
+              }
+
+              // Gambar teks di posisi dari config. Dipakai HUD dan pratinjau di GUI.
+              public static void drawAt(DrawContext context, MinecraftClient mc, boolean on, int alpha) {
+                  // Formatting.BOLD sama dengan kode warna Minecraft "§l".
+                  Text text = Text.literal("Hitbox: " + (on ? "ON" : "OFF")).formatted(Formatting.BOLD);
+                  int sw = context.getScaledWindowWidth();
+                  int sh = context.getScaledWindowHeight();
+                  int w = mc.textRenderer.getWidth(text);
+
+                  int x = Math.round(HitboxConfig.textX * sw) - w / 2;
+                  int y = Math.round(HitboxConfig.textY * sh) - 4;
+                  x = Math.max(1, Math.min(sw - w - 1, x));
+                  y = Math.max(1, Math.min(sh - 10, y));
+
+                  int fill = (alpha << 24) | (on ? 0x33FF33 : 0xFF3333);
+                  int black = alpha << 24;
+
+                  // Outline hitam: gambar teks hitam di 8 arah, lalu teks berwarna di atasnya.
+                  for (int dx = -1; dx <= 1; dx++) {
+                      for (int dy = -1; dy <= 1; dy++) {
+                          if (dx == 0 && dy == 0) continue;
+                          context.drawText(mc.textRenderer, text, x + dx, y + dy, black, false);
+                      }
+                  }
+                  context.drawText(mc.textRenderer, text, x, y, fill, false);
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/hitboxexpander/HitboxKeys.java <<'EOF'
+          package com.hitboxexpander;
+
+          import net.minecraft.client.MinecraftClient;
+          import org.lwjgl.glfw.GLFW;
+
+          // Keybind toggle: dibaca langsung lewat GLFW tiap tick (tanpa Fabric API).
+          public final class HitboxKeys {
+              // true = sedang menunggu pemain menekan tombol untuk dijadikan keybind.
+              public static volatile boolean listening = false;
+              public static volatile int tickCalls = 0;
+              private static boolean wasDown = false;
+
+              private HitboxKeys() {}
+
+              public static void tick(MinecraftClient mc) {
+                  tickCalls++;
+                  long handle = mc.getWindow().getHandle();
+
+                  if (listening) {
+                      if (!(mc.currentScreen instanceof HitboxScreen)) {
+                          listening = false;
+                          return;
+                      }
+                      for (int k = GLFW.GLFW_KEY_SPACE; k <= GLFW.GLFW_KEY_LAST; k++) {
+                          if (GLFW.glfwGetKey(handle, k) == GLFW.GLFW_PRESS) {
+                              if (k != GLFW.GLFW_KEY_ESCAPE) {
+                                  HitboxConfig.toggleKey = k;
+                                  HitboxConfig.save();
+                              }
+                              listening = false;
+                              wasDown = true; // jangan langsung ter-toggle saat tombol masih ditahan
+                              break;
+                          }
+                      }
+                      return;
+                  }
+
+                  int key = HitboxConfig.toggleKey;
+                  if (key < 0) return;
+
+                  boolean down = GLFW.glfwGetKey(handle, key) == GLFW.GLFW_PRESS;
+                  // Hanya bereaksi saat tidak ada layar terbuka (chat, inventory, dll).
+                  if (down && !wasDown && mc.currentScreen == null) {
+                      HitboxConfig.toggle();
+                  }
+                  wasDown = down;
+              }
+
+              public static String keyName(int k) {
+                  if (k < 0) return "Belum diatur";
+                  if ((k >= GLFW.GLFW_KEY_A && k <= GLFW.GLFW_KEY_Z) || (k >= GLFW.GLFW_KEY_0 && k <= GLFW.GLFW_KEY_9)) {
+                      return String.valueOf((char) k);
+                  }
+                  if (k >= GLFW.GLFW_KEY_F1 && k <= GLFW.GLFW_KEY_F25) {
+                      return "F" + (k - GLFW.GLFW_KEY_F1 + 1);
+                  }
+                  switch (k) {
+                      case GLFW.GLFW_KEY_SPACE: return "Space";
+                      case GLFW.GLFW_KEY_TAB: return "Tab";
+                      case GLFW.GLFW_KEY_ENTER: return "Enter";
+                      case GLFW.GLFW_KEY_BACKSPACE: return "Backspace";
+                      case GLFW.GLFW_KEY_INSERT: return "Insert";
+                      case GLFW.GLFW_KEY_DELETE: return "Delete";
+                      case GLFW.GLFW_KEY_HOME: return "Home";
+                      case GLFW.GLFW_KEY_END: return "End";
+                      case GLFW.GLFW_KEY_PAGE_UP: return "Page Up";
+                      case GLFW.GLFW_KEY_PAGE_DOWN: return "Page Down";
+                      case GLFW.GLFW_KEY_UP: return "Panah Atas";
+                      case GLFW.GLFW_KEY_DOWN: return "Panah Bawah";
+                      case GLFW.GLFW_KEY_LEFT: return "Panah Kiri";
+                      case GLFW.GLFW_KEY_RIGHT: return "Panah Kanan";
+                      case GLFW.GLFW_KEY_LEFT_SHIFT: return "Shift Kiri";
+                      case GLFW.GLFW_KEY_RIGHT_SHIFT: return "Shift Kanan";
+                      case GLFW.GLFW_KEY_LEFT_CONTROL: return "Ctrl Kiri";
+                      case GLFW.GLFW_KEY_RIGHT_CONTROL: return "Ctrl Kanan";
+                      case GLFW.GLFW_KEY_LEFT_ALT: return "Alt Kiri";
+                      case GLFW.GLFW_KEY_RIGHT_ALT: return "Alt Kanan";
+                      case GLFW.GLFW_KEY_GRAVE_ACCENT: return "`";
+                      case GLFW.GLFW_KEY_MINUS: return "-";
+                      case GLFW.GLFW_KEY_EQUAL: return "=";
+                      case GLFW.GLFW_KEY_COMMA: return ",";
+                      case GLFW.GLFW_KEY_PERIOD: return ".";
+                      case GLFW.GLFW_KEY_SLASH: return "/";
+                      case GLFW.GLFW_KEY_SEMICOLON: return ";";
+                      case GLFW.GLFW_KEY_APOSTROPHE: return "'";
+                      case GLFW.GLFW_KEY_LEFT_BRACKET: return "[";
+                      case GLFW.GLFW_KEY_RIGHT_BRACKET: return "]";
+                      case GLFW.GLFW_KEY_BACKSLASH: return "\\";
+                      default: return "Tombol " + k;
                   }
               }
           }
@@ -213,8 +464,15 @@ jobs:
           import net.minecraft.client.gui.widget.SliderWidget;
           import net.minecraft.text.Text;
 
+          import java.util.function.DoubleConsumer;
+          import java.util.function.DoubleFunction;
+
           public class HitboxScreen extends Screen {
               private final Screen parent;
+              private ButtonWidget toggleButton;
+              private ButtonWidget keyButton;
+              private ButtonWidget textButton;
+              private ButtonWidget soundButton;
 
               public HitboxScreen(Screen parent) {
                   super(Text.literal("Hitbox Expander"));
@@ -225,52 +483,129 @@ jobs:
                   return Text.literal("Hitbox: " + (HitboxConfig.enabled ? "ON" : "OFF"));
               }
 
+              private static Text keyLabel() {
+                  if (HitboxKeys.listening) {
+                      return Text.literal("Tekan tombol... (ESC)");
+                  }
+                  return Text.literal("Keybind: " + HitboxKeys.keyName(HitboxConfig.toggleKey));
+              }
+
+              private static Text textLabel() {
+                  return Text.literal("Teks layar: " + (HitboxConfig.textEnabled ? "ON" : "OFF"));
+              }
+
+              private static Text soundLabel() {
+                  return Text.literal("Suara: " + HitboxConfig.SOUND_NAMES[HitboxConfig.soundMode]);
+              }
+
               @Override
               protected void init() {
-                  int w = 200;
+                  HitboxKeys.listening = false;
+
                   int h = 20;
-                  int x = this.width / 2 - w / 2;
-                  int y = this.height / 2 - 40;
+                  int step = h + 4;
+                  int colW = Math.max(100, Math.min(150, (this.width - 30) / 2));
+                  int leftX = this.width / 2 - colW - 3;
+                  int rightX = this.width / 2 + 3;
+                  int y = this.height / 2 - 52;
 
-                  this.addDrawableChild(ButtonWidget.builder(toggleLabel(), button -> {
-                      HitboxConfig.enabled = !HitboxConfig.enabled;
-                      button.setMessage(toggleLabel());
-                  }).dimensions(x, y, w, h).build());
+                  // Kolom kiri: pengaturan hitbox
+                  toggleButton = ButtonWidget.builder(toggleLabel(), button -> HitboxConfig.toggle())
+                      .dimensions(leftX, y, colW, h).build();
+                  this.addDrawableChild(toggleButton);
 
-                  this.addDrawableChild(new MarginSlider(x, y + 28, w, h));
+                  this.addDrawableChild(new ValueSlider(leftX, y + step, colW, h, "Ukuran: +", HitboxConfig.margin,
+                      v -> String.format("%.2f", v),
+                      v -> {
+                          HitboxConfig.margin = (float) v;
+                          HitboxConfig.save();
+                      }));
 
+                  keyButton = ButtonWidget.builder(keyLabel(), button -> HitboxKeys.listening = true)
+                      .dimensions(leftX, y + step * 2, colW, h).build();
+                  this.addDrawableChild(keyButton);
+
+                  // Kolom kanan: teks dan suara
+                  textButton = ButtonWidget.builder(textLabel(), button -> {
+                      HitboxConfig.textEnabled = !HitboxConfig.textEnabled;
+                      HitboxConfig.save();
+                  }).dimensions(rightX, y, colW, h).build();
+                  this.addDrawableChild(textButton);
+
+                  this.addDrawableChild(new ValueSlider(rightX, y + step, colW, h, "Teks X: ", HitboxConfig.textX,
+                      v -> Math.round(v * 100) + "%",
+                      v -> {
+                          HitboxConfig.textX = (float) v;
+                          HitboxConfig.save();
+                      }));
+
+                  this.addDrawableChild(new ValueSlider(rightX, y + step * 2, colW, h, "Teks Y: ", HitboxConfig.textY,
+                      v -> Math.round(v * 100) + "%",
+                      v -> {
+                          HitboxConfig.textY = (float) v;
+                          HitboxConfig.save();
+                      }));
+
+                  soundButton = ButtonWidget.builder(soundLabel(), button -> {
+                      HitboxConfig.soundMode = (HitboxConfig.soundMode + 1) % HitboxConfig.SOUND_COUNT;
+                      HitboxConfig.save();
+                      HitboxFeedback.preview();
+                  }).dimensions(rightX, y + step * 3, colW, h).build();
+                  this.addDrawableChild(soundButton);
+
+                  // Tombol selesai di tengah bawah
                   this.addDrawableChild(ButtonWidget.builder(Text.literal("Selesai"), button -> this.close())
-                      .dimensions(x, y + 64, w, h).build());
+                      .dimensions(this.width / 2 - 60, y + step * 4 + 4, 120, h).build());
               }
 
               @Override
               public void render(DrawContext context, int mouseX, int mouseY, float delta) {
+                  // Perbarui tulisan tombol tiap frame supaya selalu sesuai status terbaru.
+                  if (toggleButton != null) toggleButton.setMessage(toggleLabel());
+                  if (keyButton != null) keyButton.setMessage(keyLabel());
+                  if (textButton != null) textButton.setMessage(textLabel());
+                  if (soundButton != null) soundButton.setMessage(soundLabel());
+
                   super.render(context, mouseX, mouseY, delta);
-                  context.drawCenteredTextWithShadow(this.textRenderer, this.title, this.width / 2, this.height / 2 - 66, 0xFFFFFFFF);
+                  context.drawCenteredTextWithShadow(this.textRenderer, this.title, this.width / 2, this.height / 2 - 76, 0xFFFFFFFF);
+
+                  // Pratinjau teks di posisi yang dipilih.
+                  if (HitboxConfig.textEnabled && this.client != null) {
+                      HitboxFeedback.drawAt(context, this.client, HitboxConfig.enabled, 255);
+                  }
               }
 
               @Override
               public void close() {
+                  HitboxKeys.listening = false;
                   if (this.client != null) {
                       this.client.setScreen(this.parent);
                   }
               }
 
-              private static class MarginSlider extends SliderWidget {
-                  MarginSlider(int x, int y, int w, int h) {
-                      super(x, y, w, h, Text.empty(), HitboxConfig.margin);
+              // Slider serbaguna: nilai 0..1, label dan aksi diatur lewat parameter.
+              private static class ValueSlider extends SliderWidget {
+                  private final String label;
+                  private final DoubleFunction<String> format;
+                  private final DoubleConsumer onChange;
+
+                  ValueSlider(int x, int y, int w, int h, String label, double initial,
+                              DoubleFunction<String> format, DoubleConsumer onChange) {
+                      super(x, y, w, h, Text.empty(), initial);
+                      this.label = label;
+                      this.format = format;
+                      this.onChange = onChange;
                       updateMessage();
                   }
 
                   @Override
                   protected void updateMessage() {
-                      setMessage(Text.literal("Ukuran: +" + String.format("%.2f", (float) this.value)));
+                      setMessage(Text.literal(this.label + this.format.apply(this.value)));
                   }
 
                   @Override
                   protected void applyValue() {
-                      HitboxConfig.margin = (float) this.value;
-                      HitboxConfig.save();
+                      this.onChange.accept(this.value);
                   }
               }
           }
@@ -305,17 +640,31 @@ jobs:
                       .then(ClientCommandManager.literal("status").executes(ctx -> {
                           ctx.getSource().sendFeedback(Text.literal("Hitbox: "
                               + (HitboxConfig.enabled ? "ON" : "OFF")
-                              + " (+" + HitboxConfig.margin + ") | terpakai: " + HitboxConfig.applied + " kali"));
+                              + " (+" + HitboxConfig.margin + ") | keybind: " + HitboxKeys.keyName(HitboxConfig.toggleKey)
+                              + " | suara: " + HitboxConfig.SOUND_NAMES[HitboxConfig.soundMode]
+                              + " | terpakai: " + HitboxConfig.applied
+                              + " | tick: " + HitboxKeys.tickCalls
+                              + " | hud: " + HitboxFeedback.drawCalls));
                           return 1;
                       }))
                       .then(ClientCommandManager.literal("on").executes(ctx -> {
-                          HitboxConfig.enabled = true;
+                          HitboxConfig.setEnabled(true);
                           ctx.getSource().sendFeedback(Text.literal("Hitbox ON (+" + HitboxConfig.margin + ")"));
                           return 1;
                       }))
                       .then(ClientCommandManager.literal("off").executes(ctx -> {
-                          HitboxConfig.enabled = false;
+                          HitboxConfig.setEnabled(false);
                           ctx.getSource().sendFeedback(Text.literal("Hitbox OFF"));
+                          return 1;
+                      }))
+                      .then(ClientCommandManager.literal("toggle").executes(ctx -> {
+                          HitboxConfig.toggle();
+                          return 1;
+                      }))
+                      .then(ClientCommandManager.literal("unbind").executes(ctx -> {
+                          HitboxConfig.toggleKey = -1;
+                          HitboxConfig.save();
+                          ctx.getSource().sendFeedback(Text.literal("Keybind toggle dihapus"));
                           return 1;
                       }))
                       .then(ClientCommandManager.argument("ukuran", FloatArgumentType.floatArg(0.0f, 1.0f))
@@ -371,6 +720,55 @@ jobs:
           }
           EOF
 
+          cat > src/main/java/com/hitboxexpander/mixin/MinecraftClientMixin.java <<'EOF'
+          package com.hitboxexpander.mixin;
+
+          import com.hitboxexpander.HitboxKeys;
+          import net.minecraft.client.MinecraftClient;
+          import org.spongepowered.asm.mixin.Mixin;
+          import org.spongepowered.asm.mixin.injection.At;
+          import org.spongepowered.asm.mixin.injection.Inject;
+          import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+          @Mixin(MinecraftClient.class)
+          public abstract class MinecraftClientMixin {
+              // Dipanggil tiap tick untuk membaca keybind toggle.
+              @Inject(method = "tick", at = @At("HEAD"), require = 0)
+              private void hitboxexpander$tick(CallbackInfo ci) {
+                  try {
+                      HitboxKeys.tick((MinecraftClient) (Object) this);
+                  } catch (Throwable ignored) {
+                  }
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/hitboxexpander/mixin/InGameHudMixin.java <<'EOF'
+          package com.hitboxexpander.mixin;
+
+          import com.hitboxexpander.HitboxFeedback;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.hud.InGameHud;
+          import net.minecraft.client.render.RenderTickCounter;
+          import org.spongepowered.asm.mixin.Mixin;
+          import org.spongepowered.asm.mixin.injection.At;
+          import org.spongepowered.asm.mixin.injection.Inject;
+          import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
+
+          @Mixin(InGameHud.class)
+          public abstract class InGameHudMixin {
+              // Gambar teks Hitbox: ON/OFF di atas HUD.
+              @Inject(method = "render", at = @At("TAIL"), require = 0)
+              private void hitboxexpander$draw(DrawContext context, RenderTickCounter tickCounter, CallbackInfo ci) {
+                  try {
+                      HitboxFeedback.draw(context, MinecraftClient.getInstance());
+                  } catch (Throwable ignored) {
+                  }
+              }
+          }
+          EOF
+
       - name: Build
         working-directory: mod
         run: gradle build --no-daemon
@@ -385,4 +783,3 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: Hitbox Mod build ${{ github.run_number }}
           files: mod/build/libs/hitboxexpander-1.0.0.jar
-          
