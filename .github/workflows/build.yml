@@ -66,7 +66,7 @@ jobs:
               minecraft "com.mojang:minecraft:${project.minecraft_version}"
               mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
               modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-              // Hanya untuk compile perintah /hitbox. Mod tetap jalan tanpa Fabric API.
+              // Hanya untuk compile perintah /hitbox dan /hb. Mod tetap jalan tanpa Fabric API.
               modCompileOnly "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
           }
 
@@ -93,7 +93,7 @@ jobs:
             "id": "hitboxexpander",
             "version": "${version}",
             "name": "Hitbox Expander",
-            "description": "Memperbesar hitbox makhluk di sisi client.",
+            "description": "Memperbesar hitbox makhluk di sisi client, dengan menu GUI.",
             "license": "MIT",
             "environment": "client",
             "entrypoints": {
@@ -131,14 +131,54 @@ jobs:
           cat > src/main/java/com/hitboxexpander/HitboxConfig.java <<'EOF'
           package com.hitboxexpander;
 
+          import net.fabricmc.loader.api.FabricLoader;
+
+          import java.io.InputStream;
+          import java.io.OutputStream;
+          import java.nio.file.Files;
+          import java.nio.file.Path;
+          import java.util.Properties;
+
           public final class HitboxConfig {
-              public static volatile boolean enabled = true;
-              // Tambahan ukuran hitbox (blok) di setiap sisi.
+              // Selalu MATI saat game baru dibuka. Harus dinyalakan lagi lewat GUI atau /hitbox on.
+              public static volatile boolean enabled = false;
+              // Tambahan ukuran hitbox (blok) di setiap sisi. Ini yang disimpan ke file.
               public static volatile float margin = 0.3f;
               // Berapa kali hitbox diperbesar (untuk mengecek mixin aktif atau tidak).
               public static volatile long applied = 0;
 
               private HitboxConfig() {}
+
+              private static Path file() {
+                  return FabricLoader.getInstance().getConfigDir().resolve("hitboxexpander.properties");
+              }
+
+              public static void load() {
+                  try {
+                      Path f = file();
+                      if (!Files.exists(f)) return;
+                      Properties p = new Properties();
+                      try (InputStream in = Files.newInputStream(f)) {
+                          p.load(in);
+                      }
+                      float m = Float.parseFloat(p.getProperty("margin", "0.3"));
+                      margin = Math.max(0.0f, Math.min(1.0f, m));
+                  } catch (Throwable t) {
+                      System.err.println("[HitboxExpander] Gagal membaca config: " + t);
+                  }
+              }
+
+              public static void save() {
+                  try {
+                      Properties p = new Properties();
+                      p.setProperty("margin", Float.toString(margin));
+                      try (OutputStream out = Files.newOutputStream(file())) {
+                          p.store(out, "Hitbox Expander");
+                      }
+                  } catch (Throwable t) {
+                      System.err.println("[HitboxExpander] Gagal menyimpan config: " + t);
+                  }
+              }
           }
           EOF
 
@@ -151,13 +191,86 @@ jobs:
           public class HitboxExpanderClient implements ClientModInitializer {
               @Override
               public void onInitializeClient() {
+                  HitboxConfig.load();
                   try {
-                      // Perintah /hitbox hanya didaftarkan kalau Fabric API ada.
+                      // Perintah /hitbox dan /hb hanya didaftarkan kalau Fabric API ada.
                       if (FabricLoader.getInstance().isModLoaded("fabric-command-api-v2")) {
                           HitboxCommand.register();
                       }
                   } catch (Throwable t) {
-                      System.err.println("[HitboxExpander] Perintah /hitbox dilewati: " + t);
+                      System.err.println("[HitboxExpander] Perintah dilewati: " + t);
+                  }
+              }
+          }
+          EOF
+
+          cat > src/main/java/com/hitboxexpander/HitboxScreen.java <<'EOF'
+          package com.hitboxexpander;
+
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.widget.ButtonWidget;
+          import net.minecraft.client.gui.widget.SliderWidget;
+          import net.minecraft.text.Text;
+
+          public class HitboxScreen extends Screen {
+              private final Screen parent;
+
+              public HitboxScreen(Screen parent) {
+                  super(Text.literal("Hitbox Expander"));
+                  this.parent = parent;
+              }
+
+              private static Text toggleLabel() {
+                  return Text.literal("Hitbox: " + (HitboxConfig.enabled ? "ON" : "OFF"));
+              }
+
+              @Override
+              protected void init() {
+                  int w = 200;
+                  int h = 20;
+                  int x = this.width / 2 - w / 2;
+                  int y = this.height / 2 - 40;
+
+                  this.addDrawableChild(ButtonWidget.builder(toggleLabel(), button -> {
+                      HitboxConfig.enabled = !HitboxConfig.enabled;
+                      button.setMessage(toggleLabel());
+                  }).dimensions(x, y, w, h).build());
+
+                  this.addDrawableChild(new MarginSlider(x, y + 28, w, h));
+
+                  this.addDrawableChild(ButtonWidget.builder(Text.literal("Selesai"), button -> this.close())
+                      .dimensions(x, y + 64, w, h).build());
+              }
+
+              @Override
+              public void render(DrawContext context, int mouseX, int mouseY, float delta) {
+                  super.render(context, mouseX, mouseY, delta);
+                  context.drawCenteredTextWithShadow(this.textRenderer, this.title, this.width / 2, this.height / 2 - 66, 0xFFFFFFFF);
+              }
+
+              @Override
+              public void close() {
+                  if (this.client != null) {
+                      this.client.setScreen(this.parent);
+                  }
+              }
+
+              private static class MarginSlider extends SliderWidget {
+                  MarginSlider(int x, int y, int w, int h) {
+                      super(x, y, w, h, Text.empty(), HitboxConfig.margin);
+                      updateMessage();
+                  }
+
+                  @Override
+                  protected void updateMessage() {
+                      setMessage(Text.literal("Ukuran: +" + String.format("%.2f", (float) this.value)));
+                  }
+
+                  @Override
+                  protected void applyValue() {
+                      HitboxConfig.margin = (float) this.value;
+                      HitboxConfig.save();
                   }
               }
           }
@@ -167,40 +280,59 @@ jobs:
           package com.hitboxexpander;
 
           import com.mojang.brigadier.arguments.FloatArgumentType;
+          import com.mojang.brigadier.builder.LiteralArgumentBuilder;
           import net.fabricmc.fabric.api.client.command.v2.ClientCommandManager;
           import net.fabricmc.fabric.api.client.command.v2.ClientCommandRegistrationCallback;
+          import net.fabricmc.fabric.api.client.command.v2.FabricClientCommandSource;
+          import net.minecraft.client.MinecraftClient;
           import net.minecraft.text.Text;
 
           final class HitboxCommand {
               private HitboxCommand() {}
 
-              static void register() {
-                  ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) ->
-                      dispatcher.register(ClientCommandManager.literal("hitbox")
+              private static void openGui() {
+                  MinecraftClient mc = MinecraftClient.getInstance();
+                  // Ditunda satu tick supaya tidak langsung ditutup oleh layar chat.
+                  mc.send(() -> mc.setScreen(new HitboxScreen(null)));
+              }
+
+              private static LiteralArgumentBuilder<FabricClientCommandSource> build(String name) {
+                  return ClientCommandManager.literal(name)
+                      .executes(ctx -> {
+                          openGui();
+                          return 1;
+                      })
+                      .then(ClientCommandManager.literal("status").executes(ctx -> {
+                          ctx.getSource().sendFeedback(Text.literal("Hitbox: "
+                              + (HitboxConfig.enabled ? "ON" : "OFF")
+                              + " (+" + HitboxConfig.margin + ") | terpakai: " + HitboxConfig.applied + " kali"));
+                          return 1;
+                      }))
+                      .then(ClientCommandManager.literal("on").executes(ctx -> {
+                          HitboxConfig.enabled = true;
+                          ctx.getSource().sendFeedback(Text.literal("Hitbox ON (+" + HitboxConfig.margin + ")"));
+                          return 1;
+                      }))
+                      .then(ClientCommandManager.literal("off").executes(ctx -> {
+                          HitboxConfig.enabled = false;
+                          ctx.getSource().sendFeedback(Text.literal("Hitbox OFF"));
+                          return 1;
+                      }))
+                      .then(ClientCommandManager.argument("ukuran", FloatArgumentType.floatArg(0.0f, 1.0f))
                           .executes(ctx -> {
-                              ctx.getSource().sendFeedback(Text.literal("Hitbox: "
-                                  + (HitboxConfig.enabled ? "ON" : "OFF")
-                                  + " (+" + HitboxConfig.margin + ") | terpakai: " + HitboxConfig.applied
-                                  + " kali. Pakai /hitbox on, /hitbox off, atau /hitbox 0.5"));
+                              HitboxConfig.margin = FloatArgumentType.getFloat(ctx, "ukuran");
+                              HitboxConfig.save();
+                              ctx.getSource().sendFeedback(Text.literal("Ukuran hitbox diatur ke +" + HitboxConfig.margin
+                                  + " (" + (HitboxConfig.enabled ? "ON" : "OFF, nyalakan dengan /hitbox on") + ")"));
                               return 1;
-                          })
-                          .then(ClientCommandManager.literal("on").executes(ctx -> {
-                              HitboxConfig.enabled = true;
-                              ctx.getSource().sendFeedback(Text.literal("Hitbox ON (+" + HitboxConfig.margin + ")"));
-                              return 1;
-                          }))
-                          .then(ClientCommandManager.literal("off").executes(ctx -> {
-                              HitboxConfig.enabled = false;
-                              ctx.getSource().sendFeedback(Text.literal("Hitbox OFF"));
-                              return 1;
-                          }))
-                          .then(ClientCommandManager.argument("ukuran", FloatArgumentType.floatArg(0.0f, 1.0f))
-                              .executes(ctx -> {
-                                  HitboxConfig.margin = FloatArgumentType.getFloat(ctx, "ukuran");
-                                  HitboxConfig.enabled = true;
-                                  ctx.getSource().sendFeedback(Text.literal("Hitbox ON (+" + HitboxConfig.margin + ")"));
-                                  return 1;
-                              }))));
+                          }));
+              }
+
+              static void register() {
+                  ClientCommandRegistrationCallback.EVENT.register((dispatcher, registryAccess) -> {
+                      dispatcher.register(build("hitbox"));
+                      dispatcher.register(build("hb"));
+                  });
               }
           }
           EOF
@@ -253,3 +385,4 @@ jobs:
           tag_name: build-${{ github.run_number }}
           name: Hitbox Mod build ${{ github.run_number }}
           files: mod/build/libs/hitboxexpander-1.0.0.jar
+          
